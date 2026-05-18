@@ -1,52 +1,73 @@
 const express = require('express');
 const axios = require('axios');
 const app = express();
-app.use(express.json());
 
 const TELEGRAM_TOKEN = '8825683546:AAHy5AaOjk5bo3YlFTJ-EYcaOrT2X-lLiJQ';
 const MY_CHAT_ID = '924999061';
 
-app.post('/webhook', async (req, res) => {
+// CHANGE THIS: Put the wallet address you want to watch inside the single quotes
+const WATCH_ADDRESS = 'TRddavA3419yiCR5m7fT5H7vbrRNzvXVdE'; 
+
+let lastSeenTxId = '';
+
+async function checkWalletTransactions() {
     try {
-        const payload = req.body;
-        console.log("Received a payload from QuickNode!");
+        // Fetch the latest TRC20 transfers for your address directly from TronGrid
+        const response = await axios.get(`https://api.trongrid.io/v1/accounts/${WATCH_ADDRESS}/transactions/trc20`, {
+            params: { limit: 1 }
+        });
 
-        // Handle case where QuickNode sends a direct block/tx array or a wrapped object
-        const txs = Array.isArray(payload) ? payload : (payload.data || payload.transactions || []);
+        const transfers = response.data.data;
+        if (transfers && transfers.length > 0) {
+            const latestTx = transfers[0];
+            const currentTxId = latestTx.transaction_id;
 
-        if (txs.length > 0) {
-            for (let tx of txs) {
-                // Get the transaction hash/ID depending on format
-                const txId = tx.txID || tx.hash || tx.id || 'N/A';
+            // If it's a new transaction we haven't processed yet
+            if (lastSeenTxId && currentTxId !== lastSeenTxId) {
+                const tokenName = latestTx.token_info.symbol || 'Tokens';
+                const decimals = latestTx.token_info.decimals || 6;
+                const rawAmount = latestTx.value;
+                const amount = (rawAmount / Math.pow(10, decimals)).toFixed(2);
+                const fromAddress = latestTx.from;
+                const toAddress = latestTx.to;
+
+                let type = '📥 Received';
+                if (fromAddress.toLowerCase() === WATCH_ADDRESS.toLowerCase()) {
+                    type = '📤 Sent';
+                }
+
+                const message = `🔔 *TRC20 Wallet Alert!*\n\n` +
+                                `• *Type:* ${type}\n` +
+                                `• *Amount:* ${amount} ${tokenName}\n` +
+                                `• *From:* \`${fromAddress}\`\n` +
+                                `• *To:* \`${toAddress}\`\n` +
+                                `• [View on TronScan](https://tronscan.org/#/transaction/${currentTxId})`;
+
+                // Send straight to Telegram
+                await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+                    chat_id: MY_CHAT_ID,
+                    text: message,
+                    parse_mode: 'Markdown'
+                });
                 
-                const message = `🔔 *New TRC20 Activity Detected!*\n\n` +
-                                `• *TxID:* \`${txId}\`\n` +
-                                `• *View Details:* [TronScan Link](https://tronscan.org/#/transaction/${txId})`;
+                console.log(`Notification sent for TX: ${currentTxId}`);
+            }
 
-                await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-                    chat_id: MY_CHAT_ID,
-                    text: message,
-                    parse_mode: 'Markdown'
-                });
-            }
-        } else {
-            // If it's a test ping or single notification item
-            const singleId = payload.txID || (payload[0] && payload[0].txID);
-            if (singleId) {
-                const message = `🔔 *New TRC20 Activity Detected!*\n\n• *TxID:* \`${singleId}\`\n• [TronScan Link](https://tronscan.org/#/transaction/${singleId})`;
-                await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-                    chat_id: MY_CHAT_ID,
-                    text: message,
-                    parse_mode: 'Markdown'
-                });
-            }
+            // Update our marker so we don't alert the same transaction twice
+            lastSeenTxId = currentTxId;
         }
-        
-        res.status(200).send('OK');
     } catch (error) {
-        console.error('Error processing webhook:', error.message);
-        res.status(500).send('Error');
+        console.error('Error checking Tron network:', error.message);
     }
-});
+}
 
-app.listen(process.env.PORT || 3000, () => console.log('Bot is listening...'));
+// Start watching the wallet every 15 seconds
+setInterval(checkWalletTransactions, 15000);
+
+// Keep server alive for Render
+app.get('/', (req, res) => res.send('Direct Tracker is Active!'));
+app.listen(process.env.PORT || 3000, () => {
+    console.log('Direct Blockchain Tracker Started...');
+    // Do an initial run to lock the last transaction ID
+    checkWalletTransactions();
+});
